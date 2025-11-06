@@ -368,8 +368,8 @@ def plot_spectrogram_heatmap(df:pd.DataFrame, log_scale:bool=False,
     return heat
 
 # constants
-SONG_DATA_PATH = '../data/'
-PLOTS_PATH = '../plots/'
+SONG_DATA_PATH = './data/'
+PLOTS_PATH = './plots/'
 
 # load the data files
 song_data_files = [f for f in os.listdir(SONG_DATA_PATH) if f.endswith('.wav')]
@@ -378,7 +378,8 @@ for file in song_data_files:
     # get the filename, which is the youtube id
     song_id = file.split('.')[0]
     sample_rate, data = wavfile.read(os.path.join(SONG_DATA_PATH, file))
-    print(f'{song_id} data loaded with sample rate {sample_rate} and data shape {data.shape}')
+    print('%s data loaded with sample rate %d and data shape %s'%\
+        (song_id, sample_rate, data.shape))
 
     # get top-10 notes per second using dB ranking
     df_top10_db = top_k_piano_notes_per_second(data, sample_rate, k=10,
