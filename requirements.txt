@@ -1,0 +1,8 @@
+ipython
+numpy
+scipy
+plotly
+scikit-learn
+pandas
+jupyter
+sounddevice
