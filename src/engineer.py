@@ -141,6 +141,8 @@ def piano_note_frequencies(midi_low:int=21, midi_high:int=108) -> list[tuple[str
         list of (note_name, frequency_hz, midi_number) tuples
     """
 
+    D4_int = 293 # We assume left hand is for A0 - C#3
+
     names = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
     notes = []
     for m in range(midi_low, midi_high + 1):
@@ -148,7 +150,8 @@ def piano_note_frequencies(midi_low:int=21, midi_high:int=108) -> list[tuple[str
         octave = (m // 12) - 1
         note_name = f"{name}{octave}"
         freq = 440.0 * (2.0 ** ((m - 69) / 12.0))
-        notes.append((note_name, float(freq), int(m)))
+        hand = 'L' if m < D4_int else 'R'
+        notes.append((note_name, float(freq), int(m), hand))
 
     return notes
 
@@ -188,7 +191,7 @@ def compute_note_magnitudes_per_interval(data:np.ndarray, sample_rate:int,
     """
 
     if notes is None:
-        notes = [(n, f, m) for (n, f, m) in piano_note_frequencies()]
+        notes = piano_note_frequencies()#[(n, f, m, h) for (n, f, m, h) in piano_note_frequencies()]
 
     # mix to mono
     arr = np.asarray(data)
@@ -220,7 +223,7 @@ def compute_note_magnitudes_per_interval(data:np.ndarray, sample_rate:int,
             raise ValueError('harmonic_weights must have length n_harmonics')
 
     note_harmonic_bins = []
-    for (note_name, note_freq, midi) in notes:
+    for (note_name, note_freq, midi, hand) in notes:
         bins = []
         for h in range(1, n_harmonics + 1):
             hf = note_freq * h
@@ -245,7 +248,7 @@ def compute_note_magnitudes_per_interval(data:np.ndarray, sample_rate:int,
                 val += harmonic_weights[h_idx] * mag[b]
             mags[i, j] = val
 
-    note_names = [n for (n, f, m) in notes]
+    note_names = [n for (n, f, m, h) in notes]
     df = pd.DataFrame(mags, columns=note_names)
     df.index.name = 'second'
 
@@ -312,6 +315,7 @@ def top_k_piano_notes_per_interval(data, sample_rate, k=10, interval_seconds=0.2
 
 
 def plot_spectrogram_heatmap(df:pd.DataFrame, log_scale:bool=False,
+                             points_per_second:int=1,
                              clip_percentiles:tuple[int]=(1, 99)) -> go.Heatmap:
     """
     Create a Plotly heatmap for per-second piano note magnitudes from 
@@ -320,43 +324,37 @@ def plot_spectrogram_heatmap(df:pd.DataFrame, log_scale:bool=False,
     Args:
         df: pandas.DataFrame from top_k_piano_notes_per_second
         log_scale: if True, plot log(1 + magnitude) to improve visibility
+        points_per_second: int, number of data points per second (e.g., 4 for quarter-seconds)
         clip_percentiles: tuple (low, high) of percentiles to clip color scale for contrast
 
     Returns:
         plotly.go.Heatmap object
     """
 
-    seconds = df.index.values
-    k = len(df.columns) // 2  # number of notes per second
+    seconds = df.index.values/points_per_second
+    k = len(df.columns) // 2  # number of notes per interval
     note_cols = [f'note_{i}' for i in range(1, k + 1)]
-    mag_cols = [f'mag_{i}' for i in range(1, k + 1)]
-    
+
     # Get unique notes and sort them by pitch (lowest to highest)
-    unique_notes = sorted(set(df[note_cols].values.ravel()),
-                         key=lambda x: (int(x[1:]) if len(x) == 2 else int(x[2:]),  # octave number
-                                      'C C# D D# E F F# G G# A A# B'.split().index(x[:-1]))  # note within octave
-                         )
-    
-    # Create a matrix of zeros (n_notes x n_seconds)
+    unique_notes = sorted(
+        list(set(n for row in df[note_cols].values for n in row)),
+        key=lambda x: (int(x[1:]) if len(x) == 2 else int(x[2:]),  # octave number
+                      'C C# D D# E F F# G G# A A# B'.split().index(x[:-1]))  # note within octave
+        )#[::-1]  # reverse to put lowest notes at bottom
+
+    # Create a matrix of zeros (n_notes x n_intervals)
     z = np.zeros((len(unique_notes), len(seconds)))
-    
-    # Fill in the magnitudes
-    for s, sec in enumerate(seconds):
+    for s in range(len(seconds)):
         row = df.iloc[s]
         for i in range(k):
             note = row[f'note_{i+1}']
-            mag = row[f'mag_{i+1}']
+            mag = float(row[f'mag_{i+1}']) if row[f'mag_{i+1}'] is not None else 0.0
             note_idx = unique_notes.index(note)
             z[note_idx, s] = mag
-            
-    if log_scale:
-        z_plot = np.log1p(z)
-    else:
-        z_plot = z
-        
-    # clip color range for better contrast
+
+    z_plot = np.log1p(z) if log_scale else z
     lo, hi = np.percentile(z_plot, [clip_percentiles[0], clip_percentiles[1]])
-    
+
     heat = go.Heatmap(
         x=seconds,
         y=unique_notes,
@@ -391,19 +389,43 @@ for file in song_data_files:
     print('%s data loaded with sample rate %d and data shape %s'%\
         (song_id, sample_rate, data.shape))
 
-    # get top-10 notes per quarter-second using dB ranking
-    df_top10_db = top_k_piano_notes_per_interval(data, sample_rate, k=10,
-                                                interval_seconds=0.25,
+    # Trim audio to include only observations from the 4th through the 93rd second
+    # these points will be loaded from the csv file
+    start_sec = 4
+    end_sec_inclusive = 93
+    start_idx = int(max(0, start_sec) * sample_rate)
+    end_idx = int(min(len(data) / sample_rate, end_sec_inclusive + 1) * sample_rate)
+    if start_idx >= len(data):
+        print(f"Trim range starts at {start_sec}s which is beyond file length; skipping file {song_id}")
+        continue
+    if end_idx <= start_idx:
+        print(f"Trim range invalid after clamping; skipping file {song_id}")
+        continue
+    if end_idx > len(data):
+        print(f"Requested end {end_sec_inclusive}s beyond file end; clipping to available length")
+        end_idx = len(data)
+
+    data = data[start_idx:end_idx]
+    print(f"Trimmed {song_id} to samples {start_idx}:{end_idx} ({(end_idx-start_idx)/sample_rate:.2f}s)")
+
+    # get top-K notes per quarter-second using dB ranking
+    points_per_second = 4
+    top_notes_keep = 5
+    resolution_name = {1:'', 2:'Half-', 4:'Quarter-'}[points_per_second]
+    df_topN_db = top_k_piano_notes_per_interval(data, sample_rate, k=top_notes_keep,
+                                                interval_seconds=1/points_per_second,
                                                 use_db=True, db_floor=-80)
 
-    # plot the waveform
-    fig = plysub.make_subplots(rows=2, cols=1, 
-                              subplot_titles=('Audio Waveform', 'Piano Note Detection (Quarter-Second Resolution)'),
-                              vertical_spacing=0.15)
+    # plot the waveform and a single combined note heatmap
+    fig = plysub.make_subplots(rows=2, cols=1, row_heights=[0.25, 0.75],
+                               shared_xaxes=True,
+                               subplot_titles=('Waveform',
+                                               '%sSecond Resolution Top-%d Piano Notes Spectrogram'%\
+                                                (resolution_name,top_notes_keep)))
 
     time = np.linspace(0, len(data)/sample_rate, num=len(data))
-    if data.shape[1] == 2:
-        # stereo encoding
+    if data.ndim == 2 and data.shape[1] == 2:
+        # stereo encoding: plot both channels in the waveform panel
         fig.add_trace(go.Scatter(x=time, y=data[:,0], mode='lines',
                            name='Left Channel', line={'color':'blue'},
                            hovertemplate='Time: %{x:.2f}s<br>Amplitude: %{y:.3f}<extra></extra>'),
@@ -418,14 +440,16 @@ for file in song_data_files:
                            name='Audio Signal', line={'color':'blue'},
                            hovertemplate='Time: %{x:.2f}s<br>Amplitude: %{y:.3f}<extra></extra>'),
                            row=1, col=1)
-    
-    # plot the piano note detection as a heatmap
-    fig.add_trace(plot_spectrogram_heatmap(df=df_top10_db, log_scale=True),
-                  row=2, col=1)
-    
+
+    # build a single heatmap from the top-k DataFrame
+    heat = plot_spectrogram_heatmap(df_topN_db, log_scale=True,
+                                    points_per_second=points_per_second)
+    fig.add_trace(heat, row=2, col=1)
+
     # finish with the plot and improve layout
     fig.update_layout(
-        title_text='Audio Analysis for %s'%song_id,
+        title_text='Audio Analysis for %s (seconds %d to %d)'%\
+            (song_id, start_sec, end_sec_inclusive),
         showlegend=True,
         legend=dict(
             orientation="h",
@@ -434,21 +458,18 @@ for file in song_data_files:
             xanchor="center",
             x=0.5
         ),
-        height=800,
-        width = 1200,
+        height=1000,
+        width=1200,
     )
-    
+
     # Update axis labels
-    fig.update_xaxes(title_text='Time', row=1, col=1)
     fig.update_xaxes(title_text='Time', row=2, col=1)
     fig.update_yaxes(title_text='Amplitude', row=1, col=1)
-    fig.update_yaxes(title_text='Piano Note', row=2, col=1)
+    fig.update_yaxes(title_text='Note', row=2, col=1)
 
-
-    plyoff.plot(fig, filename=os.path.join(PLOTS_PATH, '%s_waveform.html'%song_id),
-                auto_open=False)
+    plyoff.plot(fig, filename=os.path.join(PLOTS_PATH, '%s.html'%song_id), auto_open=False)
     # save it all
-    songs[song_id] = (sample_rate, data, df_top10_db, fig)
+    songs[song_id] = (sample_rate, data, df_topN_db, fig)
 
 
 '''
