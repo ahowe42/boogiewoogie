@@ -419,6 +419,7 @@ for file in song_data_files:
     # plot the waveform and a single combined note heatmap
     fig = plysub.make_subplots(rows=2, cols=1, row_heights=[0.25, 0.75],
                                shared_xaxes=True,
+                               vertical_spacing=0.1,
                                subplot_titles=('Waveform',
                                                '%sSecond Resolution Top-%d Piano Notes Spectrogram'%\
                                                 (resolution_name,top_notes_keep)))
@@ -458,7 +459,7 @@ for file in song_data_files:
             xanchor="center",
             x=0.5
         ),
-        height=1000,
+        height=800,
         width=1200,
     )
 
