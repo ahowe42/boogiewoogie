@@ -153,27 +153,29 @@ def piano_note_frequencies(midi_low:int=21, midi_high:int=108) -> list[tuple[str
     return notes
 
 
-def compute_note_magnitudes_per_second(data:np.ndarray, sample_rate:int,
-                                       notes:list[tuple[str, float, int]]=None,
-                                       apply_window:bool=True, n_harmonics:int=5,
-                                       harmonic_weights:list[float]=None,
-                                       use_db:bool=False, db_eps:float=1e-12,
-                                       db_floor:float=None) -> pd.DataFrame:
+def compute_note_magnitudes_per_interval(data:np.ndarray, sample_rate:int,
+                                         interval_seconds:float=0.25,
+                                         notes:list[tuple[str,float,int]]=None,
+                                         apply_window:bool=True, n_harmonics:int=5,
+                                         harmonic_weights:list[float]=None,
+                                         use_db:bool=False, db_eps:float=1e-12,
+                                         db_floor:float=None) -> pd.DataFrame:
     """
-    Compute per-second magnitudes for a list of target note frequencies.
+    Compute magnitudes per time interval for a list of target note frequencies.
 
-    This function maps each piano note to the nearest FFT bin for a 1-second rFFT
+    This function maps each piano note to the nearest FFT bin for each interval's rFFT
     and (optionally) aggregates energy from the first `n_harmonics` harmonics
     for better note detection on instruments like piano.
 
-    Returns a DataFrame with seconds as the index and one column per note name
-    containing the linear magnitude (same scaling as compute_spectra_by_second uses).
+    Returns a DataFrame with time intervals as the index and one column per note name
+    containing the linear magnitude.
 
     Args:
         data: np.array audio
         sample_rate: int
+        interval_seconds: float, length of each time interval in seconds (default 0.25)
         notes: iterable of (note_name, freq_hz, midi) tuples. If None, uses A0..C8.
-        apply_window: bool, apply Hann window to each 1s segment
+        apply_window: bool, apply Hann window to each interval segment
         n_harmonics: int, number of harmonics to include (1 = fundamental only)
         harmonic_weights: None or iterable of length n_harmonics giving weights for
             each harmonic (1-based). If None, defaults to 1/h (inverse harmonic)
@@ -182,7 +184,7 @@ def compute_note_magnitudes_per_second(data:np.ndarray, sample_rate:int,
         db_floor: float or None, if set, clip dB values to this minimum
 
     Returns:
-        pandas.DataFrame: rows=seconds, cols=note names
+        pandas.DataFrame: rows=time intervals, cols=note names
     """
 
     if notes is None:
@@ -195,17 +197,17 @@ def compute_note_magnitudes_per_second(data:np.ndarray, sample_rate:int,
     else:
         arr = arr.astype(float)
 
-    sec_len = int(sample_rate)
-    n_full_seconds = len(arr) // sec_len
-    if n_full_seconds == 0:
-        padded = np.pad(arr, (0, max(0, sec_len - len(arr))))
-        n_full_seconds = 1
+    interval_len = int(sample_rate * interval_seconds)
+    n_intervals = len(arr) // interval_len
+    if n_intervals == 0:
+        padded = np.pad(arr, (0, max(0, interval_len - len(arr))))
+        n_intervals = 1
     else:
-        padded = arr[:n_full_seconds * sec_len]
+        padded = arr[:n_intervals * interval_len]
 
-    freqs = rfftfreq(sec_len, d=1.0 / sample_rate)
-    # build result array: rows seconds, columns notes
-    mags = np.zeros((n_full_seconds, len(notes)), dtype=float)
+    freqs = rfftfreq(interval_len, d=1.0 / sample_rate)
+    # build result array: rows=intervals, columns=notes
+    mags = np.zeros((n_intervals, len(notes)), dtype=float)
 
     # map each target note to nearest FFT bin indices for harmonics (or empty if > Nyquist)
     nyquist = sample_rate / 2.0
@@ -229,8 +231,8 @@ def compute_note_magnitudes_per_second(data:np.ndarray, sample_rate:int,
                 bins.append(idx)
         note_harmonic_bins.append(bins)
 
-    for s in range(n_full_seconds):
-        seg = padded[s * sec_len:(s + 1) * sec_len].astype(float)
+    for i in range(n_intervals):
+        seg = padded[i * interval_len:(i + 1) * interval_len].astype(float)
         if apply_window:
             seg = seg * np.hanning(len(seg))
         yf = rfft(seg)
@@ -241,7 +243,7 @@ def compute_note_magnitudes_per_second(data:np.ndarray, sample_rate:int,
                 if b == -1:
                     continue
                 val += harmonic_weights[h_idx] * mag[b]
-            mags[s, j] = val
+            mags[i, j] = val
 
     note_names = [n for (n, f, m) in notes]
     df = pd.DataFrame(mags, columns=note_names)
@@ -256,34 +258,37 @@ def compute_note_magnitudes_per_second(data:np.ndarray, sample_rate:int,
     return df
 
 
-def top_k_piano_notes_per_second(data:np.ndarray, sample_rate:int, k:int=10,
-                                 apply_window:bool=True, use_db:bool=False,
-                                 db_eps:float=1e-12, db_floor:float=None) -> pd.DataFrame:
+def top_k_piano_notes_per_interval(data, sample_rate, k=10, interval_seconds=0.25,
+                                   apply_window=True, use_db=False, db_eps=1e-12,
+                                   db_floor=None):
     """
-    Return a DataFrame where each row (second) lists the top-k piano notes and
+    Return a DataFrame where each row (time interval) lists the top-k piano notes and
     magnitudes.
 
     Args:
-        data: np.array audio
-        sample_rate: int
-        k: int, number of top notes to return per second
-        apply_window: bool, whether to apply a Hann window to each 1s segment
-        use_db: bool, if True, convert linear magnitudes to decibels (20*log10)
-        db_eps: float, small value added before log10 to avoid log(0)
-        db_floor: float or None, if set, clip dB values to this minimum
+        data: np.array audio data
+        sample_rate: int, sample rate in Hz
+        k: int, number of top notes to keep per interval
+        interval_seconds: float, length of each time interval in seconds (default 0.25)
+        apply_window: bool, whether to apply Hann window to each segment
+        use_db: bool, whether to use decibel scale for magnitudes
+        db_eps: float, small value to add before log10
+        db_floor: float or None, minimum dB value to clip to
 
     Returns:
-        pandas.DataFrame: rows=seconds, Columns: note_1, mag_1, note_2, mag_2, ..., note_k, mag_k
+        DataFrame with columns: note_1, mag_1, note_2, mag_2, ..., note_k, mag_k
     """
 
     notes = piano_note_frequencies()
-    df_notes = compute_note_magnitudes_per_second(data, sample_rate, notes=notes,
-                                                  apply_window=apply_window,
-                                                  n_harmonics=5,
-                                                  harmonic_weights=None,
-                                                  use_db=use_db,
-                                                  db_eps=db_eps,
-                                                  db_floor=db_floor)
+    df_notes = compute_note_magnitudes_per_interval(data, sample_rate,
+                                                    interval_seconds=interval_seconds,
+                                                    notes=notes,
+                                                    apply_window=apply_window,
+                                                    n_harmonics=5,
+                                                    harmonic_weights=None,
+                                                    use_db=use_db,
+                                                    db_eps=db_eps,
+                                                    db_floor=db_floor)
 
     n_secs = df_notes.shape[0]
     cols = []
@@ -326,14 +331,11 @@ def plot_spectrogram_heatmap(df:pd.DataFrame, log_scale:bool=False,
     note_cols = [f'note_{i}' for i in range(1, k + 1)]
     mag_cols = [f'mag_{i}' for i in range(1, k + 1)]
     
-    # Get unique notes in order of first appearance
-    unique_notes = []
-    seen = set()
-    for notes in df[note_cols].values:
-        for note in notes:
-            if note not in seen:
-                unique_notes.append(note)
-                seen.add(note)
+    # Get unique notes and sort them by pitch (lowest to highest)
+    unique_notes = sorted(set(df[note_cols].values.ravel()),
+                         key=lambda x: (int(x[1:]) if len(x) == 2 else int(x[2:]),  # octave number
+                                      'C C# D D# E F F# G G# A A# B'.split().index(x[:-1]))  # note within octave
+                         )
     
     # Create a matrix of zeros (n_notes x n_seconds)
     z = np.zeros((len(unique_notes), len(seconds)))
@@ -363,6 +365,14 @@ def plot_spectrogram_heatmap(df:pd.DataFrame, log_scale:bool=False,
         zmin=lo,
         zmax=hi,
         colorbar=dict(title='Magnitude' + (' (log1p)' if log_scale else '')),
+        hoverongaps=False,
+        hovertemplate=(
+            'Time: %{x:.2f}s<br>' +
+            'Note: %{y}<br>' +
+            'Magnitude: %{z:.1f}' +
+            ('<br>(log scale)' if log_scale else '') +
+            '<extra></extra>'
+        )
     )
 
     return heat
@@ -381,27 +391,33 @@ for file in song_data_files:
     print('%s data loaded with sample rate %d and data shape %s'%\
         (song_id, sample_rate, data.shape))
 
-    # get top-10 notes per second using dB ranking
-    df_top10_db = top_k_piano_notes_per_second(data, sample_rate, k=10,
-                                               use_db=True, db_floor=-80)
+    # get top-10 notes per quarter-second using dB ranking
+    df_top10_db = top_k_piano_notes_per_interval(data, sample_rate, k=10,
+                                                interval_seconds=0.25,
+                                                use_db=True, db_floor=-80)
 
     # plot the waveform
     fig = plysub.make_subplots(rows=2, cols=1, 
-                              subplot_titles=('Audio Waveform', 'Piano Note Detection'),
-                              shared_xaxes=True,
+                              subplot_titles=('Audio Waveform', 'Piano Note Detection (Quarter-Second Resolution)'),
                               vertical_spacing=0.15)
 
     time = np.linspace(0, len(data)/sample_rate, num=len(data))
     if data.shape[1] == 2:
         # stereo encoding
         fig.add_trace(go.Scatter(x=time, y=data[:,0], mode='lines',
-                           name='Left Channel', line={'color':'blue'}), row=1, col=1)
+                           name='Left Channel', line={'color':'blue'},
+                           hovertemplate='Time: %{x:.2f}s<br>Amplitude: %{y:.3f}<extra></extra>'),
+                           row=1, col=1)
         fig.add_trace(go.Scatter(x=time, y=data[:,1], mode='lines',
-                           name='Right Channel', line={'color':'red'}), row=1, col=1)
+                           name='Right Channel', line={'color':'red'},
+                           hovertemplate='Time: %{x:.2f}s<br>Amplitude: %{y:.3f}<extra></extra>'),
+                           row=1, col=1)
     else:
         # mono encoding
         fig.add_trace(go.Scatter(x=time, y=data, mode='lines',
-                           name='Audio Signal', line={'color':'blue'}), row=1, col=1)
+                           name='Audio Signal', line={'color':'blue'},
+                           hovertemplate='Time: %{x:.2f}s<br>Amplitude: %{y:.3f}<extra></extra>'),
+                           row=1, col=1)
     
     # plot the piano note detection as a heatmap
     fig.add_trace(plot_spectrogram_heatmap(df=df_top10_db, log_scale=True),
@@ -423,7 +439,8 @@ for file in song_data_files:
     )
     
     # Update axis labels
-    fig.update_xaxes(title_text='Time (seconds)', row=2, col=1)  # Only bottom plot needs x label
+    fig.update_xaxes(title_text='Time', row=1, col=1)
+    fig.update_xaxes(title_text='Time', row=2, col=1)
     fig.update_yaxes(title_text='Amplitude', row=1, col=1)
     fig.update_yaxes(title_text='Piano Note', row=2, col=1)
 
@@ -436,7 +453,6 @@ for file in song_data_files:
 
 '''
 TODO
-Fourier analysis
 Feature Engineering
 Save .csv of engineered data
 '''
