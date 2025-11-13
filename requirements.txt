@@ -7,3 +7,4 @@ pandas
 jupyter
 sounddevice
 scipy
+ipdb
