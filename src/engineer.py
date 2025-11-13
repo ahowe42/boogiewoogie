@@ -1,6 +1,7 @@
 import os
 import numpy as np
 import pandas as pd
+import ipdb
 
 from scipy.io import wavfile
 from scipy.fft import fft, fftfreq, rfft, rfftfreq
@@ -375,45 +376,78 @@ def plot_spectrogram_heatmap(df:pd.DataFrame, log_scale:bool=False,
 
     return heat
 
-# constants
-SONG_DATA_PATH = './data/'
-PLOTS_PATH = './plots/'
 
-# load the data files
-song_data_files = [f for f in os.listdir(SONG_DATA_PATH) if f.endswith('.wav')]
-songs = dict()
-for file in song_data_files:
-    # get the filename, which is the youtube id
-    song_id = file.split('.')[0]
-    sample_rate, data = wavfile.read(os.path.join(SONG_DATA_PATH, file))
-    print('%s data loaded with sample rate %d and data shape %s'%\
-        (song_id, sample_rate, data.shape))
+def load_song_data(input_listing:str, data_path:str) -> tuple[str, dict]:
+    '''
+    Load song data files based on a CSV listing.
 
-    # Trim audio to include only observations from the 4th through the 93rd second
-    # these points will be loaded from the csv file
-    start_sec = 4
-    end_sec_inclusive = 93
-    start_idx = int(max(0, start_sec) * sample_rate)
-    end_idx = int(min(len(data) / sample_rate, end_sec_inclusive + 1) * sample_rate)
-    if start_idx >= len(data):
-        print(f"Trim range starts at {start_sec}s which is beyond file length; skipping file {song_id}")
-        continue
-    if end_idx <= start_idx:
-        print(f"Trim range invalid after clamping; skipping file {song_id}")
-        continue
-    if end_idx > len(data):
-        print(f"Requested end {end_sec_inclusive}s beyond file end; clipping to available length")
-        end_idx = len(data)
+    Args:
+        input_listing: str, path to CSV file with song metadata
+        data_path: str, directory containing .wav files
 
-    data = data[start_idx:end_idx]
-    print(f"Trimmed {song_id} to samples {start_idx}:{end_idx} ({(end_idx-start_idx)/sample_rate:.2f}s)")
+    Returns:
+        song_listing: pds.DataFrame with song metadata
+        song_files: dict mapping youtube_id to (sample_rate, data) tuples
+    '''
+
+    # load the csv file and iteratively load them
+    song_listing = pd.read_csv(os.path.join(data_path, input_listing),
+        parse_dates=['accessed_date'])
+    song_files = dict()
+    for _, row in song_listing.iterrows():
+        # get the data
+        song_id = row['youtube_id']
+        trim_start = row['trim_stt_sec']
+        trim_stop = row['trim_stp_sec']
+
+        # load the wav file
+        song_file = os.path.join(data_path, song_id + '.wav')
+        sample_rate, data = wavfile.read(song_file)
+        print('%s data loaded with sample rate %d and data shape %s'%\
+            (song_id, sample_rate, data.shape))
+
+        # Trim audio to include only observations
+        start_idx = int(max(0, trim_start) * sample_rate)
+        end_idx = int(min(len(data) / sample_rate, trim_stop + 1) * sample_rate)
+        if start_idx >= len(data):
+            print(f"Trim range starts at {trim_start}s which is beyond file length; skipping file {song_id}")
+            continue
+        if end_idx <= start_idx:
+            print(f"Trim range invalid after clamping; skipping file {song_id}")
+            continue
+        if end_idx > len(data):
+            print(f"Requested end {trim_stop}s beyond file end; clipping to available length")
+            end_idx = len(data)
+        data = data[start_idx:end_idx]
+        print(f"Trimmed {song_id} to samples {start_idx}:{end_idx} ({(end_idx-start_idx)/sample_rate:.2f}s)")
+
+        # save it
+        song_files[song_id] = (sample_rate, data, trim_start, trim_stop)
+
+    return song_listing, song_files
+
+
+def process_song_file(data:np.ndarray, sample_rate:int, song_id:str,
+                      start_sec:int, stop_sec:int) -> tuple[pd.DataFrame, go.Figure]:
+    '''
+    Process input song file data into notes and generate plots.
+
+    Args:
+        data: np.array audio data
+        sample_rate: int, sample rate in Hz
+        song_id: str, unique identifier for the song
+        start_sec: int, starting second of the trimmed audio
+        stop_sec: int, stopping second of the trimmed audio
+
+    Returns:
+        df_topN_db: DataFrame of top-K notes per interval
+        fig: Plotly figure object
+    '''
 
     # get top-K notes per quarter-second using dB ranking
-    points_per_second = 4
-    top_notes_keep = 5
-    resolution_name = {1:'', 2:'Half-', 4:'Quarter-'}[points_per_second]
-    df_topN_db = top_k_piano_notes_per_interval(data, sample_rate, k=top_notes_keep,
-                                                interval_seconds=1/points_per_second,
+    resolution_name = {1:'', 2:'Half-', 4:'Quarter-'}[POINTS_PER_SECOND]
+    df_topN_db = top_k_piano_notes_per_interval(data, sample_rate, k=TOP_NOTES_KEEP,
+                                                interval_seconds=1/POINTS_PER_SECOND,
                                                 use_db=True, db_floor=-80)
 
     # plot the waveform and a single combined note heatmap
@@ -422,7 +456,7 @@ for file in song_data_files:
                                vertical_spacing=0.1,
                                subplot_titles=('Waveform',
                                                '%sSecond Resolution Top-%d Piano Notes Spectrogram'%\
-                                                (resolution_name,top_notes_keep)))
+                                                (resolution_name,TOP_NOTES_KEEP)))
 
     time = np.linspace(0, len(data)/sample_rate, num=len(data))
     if data.ndim == 2 and data.shape[1] == 2:
@@ -444,13 +478,13 @@ for file in song_data_files:
 
     # build a single heatmap from the top-k DataFrame
     heat = plot_spectrogram_heatmap(df_topN_db, log_scale=True,
-                                    points_per_second=points_per_second)
+                                    points_per_second=POINTS_PER_SECOND)
     fig.add_trace(heat, row=2, col=1)
 
     # finish with the plot and improve layout
     fig.update_layout(
         title_text='Audio Analysis for %s (seconds %d to %d)'%\
-            (song_id, start_sec, end_sec_inclusive),
+            (song_id, start_sec, stop_sec),
         showlegend=True,
         legend=dict(
             orientation="h",
@@ -469,12 +503,24 @@ for file in song_data_files:
     fig.update_yaxes(title_text='Note', row=2, col=1)
 
     plyoff.plot(fig, filename=os.path.join(PLOTS_PATH, '%s.html'%song_id), auto_open=False)
-    # save it all
-    songs[song_id] = (sample_rate, data, df_topN_db, fig)
+
+    return df_topN_db, fig
 
 
-'''
-TODO
-Feature Engineering
-Save .csv of engineered data
-'''
+if __name__ == '__main__':
+    # constants
+    SONG_DATA_PATH = './data/'
+    PLOTS_PATH = './plots/'
+    POINTS_PER_SECOND = 4
+    TOP_NOTES_KEEP = 5
+
+    # load the songs and process them to notes listing
+    song_proc_data = dict()
+    SONG_LISTING_FILE = 'tracks.csv'
+    song_listing, song_raw_data = load_song_data(SONG_LISTING_FILE, SONG_DATA_PATH)
+    for song_id in song_raw_data.keys():
+        print(f"Processing song {song_id}...")
+        sample_rate, data, start_sec, end_sec = song_raw_data[song_id]
+        df_topN_db, fig = process_song_file(data, sample_rate, song_id, start_sec,
+                                            end_sec)
+        song_proc_data[song_id] = (df_topN_db, fig)
