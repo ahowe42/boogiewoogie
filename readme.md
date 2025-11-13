@@ -13,3 +13,13 @@ Analysis of boogie woogie piano music extracted from youtube as wave files. The 
 ### Activate
 
 `pyenv activate bwenv`
+
+### Analysis
+
+- parse data into top N notes per <interval>-second
+
+- analysis of trends / frequencies of notes?
+
+- split left hand vs. right hand?
+
+- other?
