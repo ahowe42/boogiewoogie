@@ -244,7 +244,30 @@ def plot_spectrogram_heatmap(df:pd.DataFrame, process_params, log_scale:bool=Fal
         )
     )
 
-    return heat
+    # determine boundary between left and right hand using piano_note_frequencies hand tag
+    boundary_trace = None
+    try:
+        notes_info = {name: hand for (name, _f, _m, hand) in piano_note_frequencies()}
+        # find first index in unique_notes that is marked as right-hand
+        right_idx = None
+        for idx, n in enumerate(unique_notes):
+            if notes_info.get(n, 'R') == 'R':
+                right_idx = idx
+                break
+        if right_idx is not None and len(seconds) > 0:
+            boundary_note = unique_notes[right_idx]
+            boundary_trace = go.Scatter(
+                x=[seconds[0], seconds[-1]],
+                y=[boundary_note, boundary_note],
+                mode='lines',
+                line=dict(color='red', width=2),
+                showlegend=False,
+                hoverinfo='skip'
+            )
+    except Exception:
+        boundary_trace = None
+
+    return heat, boundary_trace
 
 
 def load_song_data(input_listing:str, data_path:str) -> tuple[str, dict]:
@@ -274,6 +297,17 @@ def load_song_data(input_listing:str, data_path:str) -> tuple[str, dict]:
         sample_rate, data = wavfile.read(song_file)
         print('%s data loaded with sample rate %d and data shape %s'%\
             (song_id, sample_rate, data.shape))
+
+        # sanitize trim values: handle missing (NaN/None) entries
+        # If trim_start is missing, default to 0. If trim_stop is missing, default to file end.
+        if pd.isna(trim_start) or trim_start is None:
+            trim_start = 0.0
+        else:
+            trim_start = float(trim_start)
+        if pd.isna(trim_stop) or trim_stop is None:
+            trim_stop = float(int(len(data) / sample_rate) - 1)
+        else:
+            trim_stop = float(trim_stop)
 
         # Trim audio to include only observations
         start_idx = int(max(0, trim_start) * sample_rate)
@@ -344,9 +378,16 @@ def process_song_file(data:np.ndarray, sample_rate:int, song_id:str,
                            hovertemplate='Time: %{x:.2f}s<br>Amplitude: %{y:.3f}<extra></extra>'),
                            row=1, col=1)
 
-    # build a single heatmap from the top-k DataFrame
-    heat = plot_spectrogram_heatmap(df_topN_db, process_params, log_scale=True)
-    fig.add_trace(heat, row=2, col=1)
+    # build a single heatmap (and optional boundary) from the top-k DataFrame
+    heat_ret = plot_spectrogram_heatmap(df_topN_db, process_params, log_scale=True)
+    # heat_ret may be (heat, boundary) tuple
+    if isinstance(heat_ret, (list, tuple)):
+        heat_trace, boundary = heat_ret
+        fig.add_trace(heat_trace, row=2, col=1)
+        if boundary is not None:
+            fig.add_trace(boundary, row=2, col=1)
+    else:
+        fig.add_trace(heat_ret, row=2, col=1)
 
     # finish with the plot and improve layout
     fig.update_layout(
