@@ -1,4 +1,5 @@
 import os
+from dotenv import dotenv_values
 import numpy as np
 import pandas as pd
 import ipdb
@@ -391,8 +392,7 @@ def load_song_data(input_listing:str, data_path:str) -> tuple[str, dict]:
     '''
 
     # load the csv file and iteratively load them
-    song_listing = pd.read_csv(os.path.join(data_path, input_listing),
-        parse_dates=['accessed_date'])
+    song_listing = pd.read_csv(input_listing, parse_dates=['accessed_date'])
     song_files = dict()
     for _, row in song_listing.iterrows():
         # get the data
@@ -508,19 +508,24 @@ def process_song_file(data:np.ndarray, sample_rate:int, song_id:str,
 
 
 if __name__ == '__main__':
-    # constants
-    SONG_DATA_PATH = './data/'
-    PLOTS_PATH = './plots/'
-    POINTS_PER_SECOND = 4
-    TOP_NOTES_KEEP = 5
+    # load environment variables from .env file
+    config = dotenv_values('./settings.env')
+    SONG_DATA_PATH = config['SONG_DATA_PATH']
+    PLOTS_PATH = config['PLOTS_PATH']
+    ENG_DATA_PATH = config['ENG_DATA_PATH']
+    SONG_LISTING_FILE = config['SONG_LISTING_FILE']
+    POINTS_PER_SECOND = int(config['POINTS_PER_SECOND'])
+    TOP_NOTES_KEEP = int(config['TOP_NOTES_KEEP'])
 
     # load the songs and process them to notes listing
-    song_proc_data = dict()
-    SONG_LISTING_FILE = 'tracks.csv'
     song_listing, song_raw_data = load_song_data(SONG_LISTING_FILE, SONG_DATA_PATH)
-    for song_id in song_raw_data.keys():
-        print(f"Processing song {song_id}...")
-        sample_rate, data, start_sec, end_sec = song_raw_data[song_id]
+    for (song_id, song_data) in song_raw_data.items():
+        print("Processing song %s..."%song_id)
+        sample_rate, data, start_sec, end_sec = song_data
         df_topN_db, fig = process_song_file(data, sample_rate, song_id, start_sec,
                                             end_sec)
-        song_proc_data[song_id] = (df_topN_db, fig)
+        # do more stuff
+
+        # save the engineered data
+        df_topN_db.to_csv(os.path.join(ENG_DATA_PATH, '%s_notes.csv'%song_id),
+                          index_label='second')
