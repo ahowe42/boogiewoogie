@@ -15,121 +15,6 @@ import sounddevice as sd # used to play sd.play(data, sample_rateOSError: PortAu
 
 
 
-def compute_spectra_by_second(data:np.ndarray, sample_rate:int,
-                              apply_window:bool=True, n_bins:int=100,
-                              fmin:float=20.0, fmax:float=None,
-                              binning:str='log') -> pd.DataFrame:
-    """
-    Compute per-second magnitude spectra using rFFT and optionally
-    bin frequencies.
-
-    Returns a pandas.DataFrame where each row is a second (0,1,2,...) and
-    columns are either raw frequency bins (Hz) or aggregated frequency bins
-    depending on `n_bins`.
-
-    Args:
-        data: np.array, mono or (n_samples, n_channels)
-        sample_rate: int
-        apply_window: bool, whether to apply a Hann window to each 1s segment
-        n_bins: int or None, number of frequency bins to aggregate into. If None,
-            returns full rFFT frequency resolution.
-        fmin: float, minimum frequency (Hz) for binning (ignored if n_bins is None)
-        fmax: float or None, maximum frequency (Hz) for binning; defaults to
-            min(20000, nyquist)
-        binning: 'log' or 'linear' spacing for bins
-
-    Returns:
-        pandas.DataFrame: rows=seconds, cols=frequencies (Hz) or bin centers
-    """
-
-    arr = np.asarray(data)
-    # mix to mono if needed
-    if arr.ndim == 2:
-        arr = arr.mean(axis=1).astype(float)
-    else:
-        arr = arr.astype(float)
-
-    sec_len = int(sample_rate)
-    n_full_seconds = len(arr) // sec_len
-    if n_full_seconds == 0:
-        # pad to one second
-        padded = np.pad(arr, (0, max(0, sec_len - len(arr))))
-        n_full_seconds = 1
-    else:
-        padded = arr[:n_full_seconds * sec_len]
-
-    # frequency bins for a 1-second rFFT
-    freqs = rfftfreq(sec_len, d=1.0 / sample_rate)
-    nyquist = sample_rate / 2.0
-
-    rows = []
-    for s in range(n_full_seconds):
-        seg = padded[s * sec_len:(s + 1) * sec_len].astype(float)
-        if apply_window:
-            seg = seg * np.hanning(len(seg))
-        yf = rfft(seg)
-        mag = (2.0 / len(seg)) * np.abs(yf)
-        rows.append(mag)
-
-    spec = np.vstack(rows)  # shape (n_seconds, n_freq_bins)
-
-    # If no binning requested, return full-resolution DataFrame
-    if n_bins is None:
-        df = pd.DataFrame(spec, columns=np.round(freqs, 3))
-        df.index.name = 'second'
-        return df
-
-    # Determine fmax default
-    if fmax is None:
-        fmax = min(20000.0, nyquist)
-
-    # sanitize fmin/fmax
-    fmin = max(0.0, float(fmin))
-    fmax = min(float(fmax), nyquist)
-    if fmax <= fmin:
-        raise ValueError('fmax must be greater than fmin')
-
-    # create bin edges
-    if binning == 'log':
-        # avoid log(0)
-        low = max(fmin, freqs[1] if freqs[0] == 0.0 else freqs[0])
-        edges = np.logspace(np.log10(low), np.log10(fmax), n_bins + 1)
-        # optionally include DC (0 Hz) as its own bin if fmin==0
-        if fmin == 0.0 and freqs[0] == 0.0:
-            edges[0] = 0.0
-    else:
-        edges = np.linspace(fmin, fmax, n_bins + 1)
-
-    # digitize the positive-frequency bins into our edges
-    # freqs are >= 0, ensure we only consider freqs within [fmin, fmax]
-    freq_vals = freqs
-    # create an index mapping each freq to a bin (1..n_bins), frequencies outside
-    # the edges will get 0 or n_bins+1 from digitize; we'll ignore those
-    inds = np.digitize(freq_vals, edges)  # 0..n_bins+1
-
-    # aggregate magnitudes into bins by summing magnitudes inside each bin
-    binned = np.zeros((spec.shape[0], n_bins), dtype=float)
-    for b in range(1, n_bins + 1):
-        mask = inds == b
-        if np.any(mask):
-            binned[:, b - 1] = spec[:, mask].sum(axis=1)
-        else:
-            binned[:, b - 1] = 0.0
-
-    # column labels: geometric center of each bin for log spacing, arithmetic for linear
-    if binning == 'log':
-        centers = np.sqrt(edges[:-1] * edges[1:])
-    else:
-        centers = 0.5 * (edges[:-1] + edges[1:])
-
-    # round centers nicely
-    centers_rounded = np.round(centers, 3)
-    df = pd.DataFrame(binned, columns=centers_rounded)
-    df.index.name = 'second'
-
-    return df
-
-
 def piano_note_frequencies(midi_low:int=21, midi_high:int=108) -> list[tuple[str, float, int]]:
     """
     Return a list of (note_name, frequency_hz, midi_number) for piano keys.
@@ -160,8 +45,7 @@ def piano_note_frequencies(midi_low:int=21, midi_high:int=108) -> list[tuple[str
 
 def compute_note_magnitudes_per_interval(data:np.ndarray, sample_rate:int,
                                          notes:list[tuple[str,float,int, str]],
-                                         process_params:dict,
-                                         harmonic_weights:list[float]=None) -> pd.DataFrame:
+                                         process_params:dict) -> pd.DataFrame:
     """
     Compute magnitudes per time interval for a list of target note frequencies.
 
@@ -176,8 +60,6 @@ def compute_note_magnitudes_per_interval(data:np.ndarray, sample_rate:int,
         data: np.array audio
         sample_rate: int
         notes: iterable of (note_name, freq_hz, midi, hand) tuples.
-        harmonic_weights: None or iterable of length n_harmonics giving weights for
-            each harmonic (1-based). If None, defaults to 1/h (inverse harmonic)
         process_params: dict, processing parameters including:
             POINTS_PER_SECOND: int, number of time points per second
             TOP_NOTES_KEEP: int, number of top notes to keep per interval
@@ -194,6 +76,9 @@ def compute_note_magnitudes_per_interval(data:np.ndarray, sample_rate:int,
     apply_window = process_params['HANN_WINDOW']
     db_eps = 1e-12
     db_floor = None
+
+    # default harmonic weights: inverse of harmonic number (1/h)
+    harmonic_weights = [1.0 / h for h in range(1, n_harmonics + 1)]
     
     # mix to mono
     arr = np.asarray(data)
@@ -216,13 +101,6 @@ def compute_note_magnitudes_per_interval(data:np.ndarray, sample_rate:int,
 
     # map each target note to nearest FFT bin indices for harmonics (or empty if > Nyquist)
     nyquist = sample_rate / 2.0
-    # default harmonic weights: inverse of harmonic number (1/h)
-    if harmonic_weights is None:
-        harmonic_weights = [1.0 / h for h in range(1, n_harmonics + 1)]
-    else:
-        harmonic_weights = list(harmonic_weights)
-        if len(harmonic_weights) != n_harmonics:
-            raise ValueError('harmonic_weights must have length n_harmonics')
 
     note_harmonic_bins = []
     for (note_name, note_freq, midi, hand) in notes:
@@ -279,10 +157,8 @@ def top_k_piano_notes_per_interval(data, sample_rate, process_params:dict) -> pd
     """
 
     notes = piano_note_frequencies()
-    df_notes = compute_note_magnitudes_per_interval(data, sample_rate,
-                                                    notes=notes,
-                                                    process_params=process_params,
-                                                    harmonic_weights=None)
+    df_notes = compute_note_magnitudes_per_interval(data, sample_rate, notes,
+                                                    process_params)
 
     k = process_params['TOP_NOTES_KEEP']
     n_secs = df_notes.shape[0]
