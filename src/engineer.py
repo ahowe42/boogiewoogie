@@ -37,7 +37,7 @@ def piano_note_frequencies(midi_low:int=21, midi_high:int=108) -> list[tuple[str
         octave = (m // 12) - 1
         note_name = f"{name}{octave}"
         freq = 440.0 * (2.0 ** ((m - 69) / 12.0))
-        hand = 'L' if m < D4_int else 'R'
+        hand = 'L' if freq < D4_int else 'R'
         notes.append((note_name, float(freq), int(m), hand))
 
     return notes
@@ -399,6 +399,9 @@ if __name__ == '__main__':
         sample_rate, data, start_sec, end_sec = song_data
         df_topN_db, fig = process_song_file(data, sample_rate, song_id, start_sec,
                                             end_sec, process_params)
+        # add the param string to the figure title
+        fig.update_layout(title_text=fig.layout.title.text + '<br>' + param_str)
+
         # do more stuff
 
         # save the plot &  engineered data
