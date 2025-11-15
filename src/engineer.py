@@ -159,12 +159,9 @@ def piano_note_frequencies(midi_low:int=21, midi_high:int=108) -> list[tuple[str
 
 
 def compute_note_magnitudes_per_interval(data:np.ndarray, sample_rate:int,
-                                         interval_seconds:float=0.25,
-                                         notes:list[tuple[str,float,int]]=None,
-                                         apply_window:bool=True, n_harmonics:int=5,
-                                         harmonic_weights:list[float]=None,
-                                         use_db:bool=False, db_eps:float=1e-12,
-                                         db_floor:float=None) -> pd.DataFrame:
+                                         notes:list[tuple[str,float,int, str]],
+                                         process_params:dict,
+                                         harmonic_weights:list[float]=None) -> pd.DataFrame:
     """
     Compute magnitudes per time interval for a list of target note frequencies.
 
@@ -178,23 +175,26 @@ def compute_note_magnitudes_per_interval(data:np.ndarray, sample_rate:int,
     Args:
         data: np.array audio
         sample_rate: int
-        interval_seconds: float, length of each time interval in seconds (default 0.25)
-        notes: iterable of (note_name, freq_hz, midi) tuples. If None, uses A0..C8.
-        apply_window: bool, apply Hann window to each interval segment
-        n_harmonics: int, number of harmonics to include (1 = fundamental only)
+        notes: iterable of (note_name, freq_hz, midi, hand) tuples.
         harmonic_weights: None or iterable of length n_harmonics giving weights for
             each harmonic (1-based). If None, defaults to 1/h (inverse harmonic)
-        use_db: bool, if True, convert linear magnitudes to decibels (20*log10)
-        db_eps: float, small value added before log10 to avoid log(0)
-        db_floor: float or None, if set, clip dB values to this minimum
+        process_params: dict, processing parameters including:
+            POINTS_PER_SECOND: int, number of time points per second
+            TOP_NOTES_KEEP: int, number of top notes to keep per interval
+            N_HARMONICS: int, number of harmonics to include
+            USE_DB: bool, whether to use decibel scale for magnitudes           
 
     Returns:
         pandas.DataFrame: rows=time intervals, cols=note names
     """
 
-    if notes is None:
-        notes = piano_note_frequencies()#[(n, f, m, h) for (n, f, m, h) in piano_note_frequencies()]
-
+    interval_seconds = 1.0 / process_params['POINTS_PER_SECOND']
+    n_harmonics = process_params['N_HARMONICS']
+    use_db = process_params['USE_DB']
+    apply_window = process_params['HANN_WINDOW']
+    db_eps = 1e-12
+    db_floor = None
+    
     # mix to mono
     arr = np.asarray(data)
     if arr.ndim == 2:
@@ -263,9 +263,7 @@ def compute_note_magnitudes_per_interval(data:np.ndarray, sample_rate:int,
     return df
 
 
-def top_k_piano_notes_per_interval(data, sample_rate, k=10, interval_seconds=0.25,
-                                   apply_window=True, use_db=False, db_eps=1e-12,
-                                   db_floor=None):
+def top_k_piano_notes_per_interval(data, sample_rate, process_params:dict) -> pd.DataFrame:
     """
     Return a DataFrame where each row (time interval) lists the top-k piano notes and
     magnitudes.
@@ -273,12 +271,8 @@ def top_k_piano_notes_per_interval(data, sample_rate, k=10, interval_seconds=0.2
     Args:
         data: np.array audio data
         sample_rate: int, sample rate in Hz
-        k: int, number of top notes to keep per interval
-        interval_seconds: float, length of each time interval in seconds (default 0.25)
-        apply_window: bool, whether to apply Hann window to each segment
-        use_db: bool, whether to use decibel scale for magnitudes
-        db_eps: float, small value to add before log10
-        db_floor: float or None, minimum dB value to clip to
+        process_params: dict, processing parameters including:
+            TOP_NOTES_KEEP: int, number of top notes to keep per interval
 
     Returns:
         DataFrame with columns: note_1, mag_1, note_2, mag_2, ..., note_k, mag_k
@@ -286,15 +280,11 @@ def top_k_piano_notes_per_interval(data, sample_rate, k=10, interval_seconds=0.2
 
     notes = piano_note_frequencies()
     df_notes = compute_note_magnitudes_per_interval(data, sample_rate,
-                                                    interval_seconds=interval_seconds,
                                                     notes=notes,
-                                                    apply_window=apply_window,
-                                                    n_harmonics=5,
-                                                    harmonic_weights=None,
-                                                    use_db=use_db,
-                                                    db_eps=db_eps,
-                                                    db_floor=db_floor)
+                                                    process_params=process_params,
+                                                    harmonic_weights=None)
 
+    k = process_params['TOP_NOTES_KEEP']
     n_secs = df_notes.shape[0]
     cols = []
     for i in range(1, k + 1):
@@ -316,8 +306,7 @@ def top_k_piano_notes_per_interval(data, sample_rate, k=10, interval_seconds=0.2
     return df_top
 
 
-def plot_spectrogram_heatmap(df:pd.DataFrame, log_scale:bool=False,
-                             points_per_second:int=1,
+def plot_spectrogram_heatmap(df:pd.DataFrame, process_params, log_scale:bool=False,
                              clip_percentiles:tuple[int]=(1, 99)) -> go.Heatmap:
     """
     Create a Plotly heatmap for per-second piano note magnitudes from 
@@ -325,15 +314,19 @@ def plot_spectrogram_heatmap(df:pd.DataFrame, log_scale:bool=False,
 
     Args:
         df: pandas.DataFrame from top_k_piano_notes_per_second
+        process_params: dict, processing parameters including:
+            POINTS_PER_SECOND: int, number of time points per second
+            TOP_NOTES_KEEP: int, number of top notes to keep per interval
+            N_HARMONICS: int, number of harmonics to include
+            USE_DB: bool, whether to use decibel scale for magnitudes           
         log_scale: if True, plot log(1 + magnitude) to improve visibility
-        points_per_second: int, number of data points per second (e.g., 4 for quarter-seconds)
         clip_percentiles: tuple (low, high) of percentiles to clip color scale for contrast
 
     Returns:
         plotly.go.Heatmap object
     """
 
-    seconds = df.index.values/points_per_second
+    seconds = df.index.values/process_params['POINTS_PER_SECOND']
     k = len(df.columns) // 2  # number of notes per interval
     note_cols = [f'note_{i}' for i in range(1, k + 1)]
 
@@ -428,7 +421,7 @@ def load_song_data(input_listing:str, data_path:str) -> tuple[str, dict]:
 
 
 def process_song_file(data:np.ndarray, sample_rate:int, song_id:str,
-                      start_sec:int, stop_sec:int) -> tuple[pd.DataFrame, go.Figure]:
+                      start_sec:int, stop_sec:int, process_params:dict) -> tuple[pd.DataFrame, go.Figure]:
     '''
     Process input song file data into notes and generate plots.
 
@@ -438,6 +431,7 @@ def process_song_file(data:np.ndarray, sample_rate:int, song_id:str,
         song_id: str, unique identifier for the song
         start_sec: int, starting second of the trimmed audio
         stop_sec: int, stopping second of the trimmed audio
+        process_params: dict, processing parameters including:
 
     Returns:
         df_topN_db: DataFrame of top-K notes per interval
@@ -445,10 +439,8 @@ def process_song_file(data:np.ndarray, sample_rate:int, song_id:str,
     '''
 
     # get top-K notes per quarter-second using dB ranking
-    resolution_name = {1:'', 2:'Half-', 4:'Quarter-'}[POINTS_PER_SECOND]
-    df_topN_db = top_k_piano_notes_per_interval(data, sample_rate, k=TOP_NOTES_KEEP,
-                                                interval_seconds=1/POINTS_PER_SECOND,
-                                                use_db=True, db_floor=-80)
+    resolution_name = {1:'', 2:'Half-', 4:'Quarter-'}[process_params['POINTS_PER_SECOND']]
+    df_topN_db = top_k_piano_notes_per_interval(data, sample_rate, process_params)
 
     # plot the waveform and a single combined note heatmap
     fig = plysub.make_subplots(rows=2, cols=1, row_heights=[0.25, 0.75],
@@ -456,7 +448,7 @@ def process_song_file(data:np.ndarray, sample_rate:int, song_id:str,
                                vertical_spacing=0.1,
                                subplot_titles=('Waveform',
                                                '%sSecond Resolution Top-%d Piano Notes Spectrogram'%\
-                                                (resolution_name,TOP_NOTES_KEEP)))
+                                                (resolution_name,process_params['TOP_NOTES_KEEP'])))
 
     time = np.linspace(0, len(data)/sample_rate, num=len(data))
     if data.ndim == 2 and data.shape[1] == 2:
@@ -477,8 +469,7 @@ def process_song_file(data:np.ndarray, sample_rate:int, song_id:str,
                            row=1, col=1)
 
     # build a single heatmap from the top-k DataFrame
-    heat = plot_spectrogram_heatmap(df_topN_db, log_scale=True,
-                                    points_per_second=POINTS_PER_SECOND)
+    heat = plot_spectrogram_heatmap(df_topN_db, process_params, log_scale=True)
     fig.add_trace(heat, row=2, col=1)
 
     # finish with the plot and improve layout
@@ -502,8 +493,6 @@ def process_song_file(data:np.ndarray, sample_rate:int, song_id:str,
     fig.update_yaxes(title_text='Amplitude', row=1, col=1)
     fig.update_yaxes(title_text='Note', row=2, col=1)
 
-    plyoff.plot(fig, filename=os.path.join(PLOTS_PATH, '%s.html'%song_id), auto_open=False)
-
     return df_topN_db, fig
 
 
@@ -514,8 +503,18 @@ if __name__ == '__main__':
     PLOTS_PATH = config['PLOTS_PATH']
     ENG_DATA_PATH = config['ENG_DATA_PATH']
     SONG_LISTING_FILE = config['SONG_LISTING_FILE']
-    POINTS_PER_SECOND = int(config['POINTS_PER_SECOND'])
-    TOP_NOTES_KEEP = int(config['TOP_NOTES_KEEP'])
+
+    process_params={'POINTS_PER_SECOND':int(config['POINTS_PER_SECOND']),
+                    'TOP_NOTES_KEEP':int(config['TOP_NOTES_KEEP']),
+                    'N_HARMONICS':int(config['N_HARMONICS']),
+                    'USE_DB':('True'==config['USE_DB']),
+                    'HANN_WINDOW':('True'==config['HANN_WINDOW'])}
+    param_str = 'pps%d_topN%d_harm%d_db%d_hann%d'%\
+        (process_params['POINTS_PER_SECOND'],
+         process_params['TOP_NOTES_KEEP'],
+         process_params['N_HARMONICS'],
+         process_params['USE_DB'],
+         process_params['HANN_WINDOW'])
 
     # load the songs and process them to notes listing
     song_listing, song_raw_data = load_song_data(SONG_LISTING_FILE, SONG_DATA_PATH)
@@ -523,9 +522,11 @@ if __name__ == '__main__':
         print("Processing song %s..."%song_id)
         sample_rate, data, start_sec, end_sec = song_data
         df_topN_db, fig = process_song_file(data, sample_rate, song_id, start_sec,
-                                            end_sec)
+                                            end_sec, process_params)
         # do more stuff
 
-        # save the engineered data
-        df_topN_db.to_csv(os.path.join(ENG_DATA_PATH, '%s_notes.csv'%song_id),
+        # save the plot &  engineered data
+        plyoff.plot(fig, filename=os.path.join(PLOTS_PATH, '%s_%s.html'%(song_id, param_str)),
+                    auto_open=False)
+        df_topN_db.to_csv(os.path.join(ENG_DATA_PATH, '%s_%s_notes.csv'%(song_id, param_str)),
                           index_label='second')
